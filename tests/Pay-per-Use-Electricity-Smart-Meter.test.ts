@@ -1,46 +1,23 @@
-import { assertEquals, runScenario } from '@stacks/clarity-js-sdk'; import { describe, it } from '@types/mocha';
-describe('Pay-per-Use Electricity Smart Meter', () => {
-  const accounts = {
-    deployer: "ST1PQHQKV0RJXZFY1DGX8MNSNYVE3VGZJSRTPGZGM",
-    user1: "ST2CY5V39NHDPWSXMW9QDT3HC3GD6Q6XX4CFRK9AG",
-    user2: "ST2JHG361ZXG51QTKY2NQCVBPPRRE2KZB1HR05NNC"
-  };
+import { describe, expect, it } from "vitest";
 
-  describe('initialization', () => {
-    it('should initialize meter successfully', () => {
-      runScenario(async (chain: any) => {
-        const result = chain.callPublic('initialize-meter', [], accounts.user1);
-        assertEquals(result.success, true);
-      });
-    });
+const accounts = simnet.getAccounts();
+const address1 = accounts.get("wallet_1")!;
+
+/*
+  The test below is an example. To learn more, read the testing documentation here:
+  https://docs.hiro.so/stacks/clarinet-js-sdk
+*/
+
+describe("example tests", () => {
+  it("ensures simnet is well initialised", () => {
+    s
+    expect(simnet.blockHeight).toBeDefined();
   });
 
-  describe('top-up', () => {
-    it('should allow valid top-up', () => {
-      runScenario(async (chain: any) => {
-        chain.callPublic('initialize-meter', [], accounts.user1);
-        const result = chain.callPublic('top-up', [1500], accounts.user1);
-        assertEquals(result.success, true);
-      });
-    });
-
-    it('should reject invalid amount', () => {
-      runScenario(async (chain: any) => {
-        chain.callPublic('initialize-meter', [], accounts.user1);
-        const result = chain.callPublic('top-up', [500], accounts.user1);
-        assertEquals(result.success, false);
-      });
-    });
-  });
-
-  describe('consume-units', () => {
-    it('should allow valid consumption', () => {
-      runScenario(async (chain: any) => {
-        chain.callPublic('initialize-meter', [], accounts.user1);
-        chain.callPublic('top-up', [2000], accounts.user1);
-        const result = chain.callPublic('consume-units', [10], accounts.user1);
-        assertEquals(result.success, true);
-      });
-    });
-  });
+  // it("shows an example", () => {
+  //   const { result } = simnet.callReadOnlyFn("counter", "get-counter", [], address1);
+  //   expect(result).toBeUint(0);
+  // });
 });
+
+

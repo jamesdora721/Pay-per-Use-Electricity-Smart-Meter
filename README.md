@@ -1,5 +1,4 @@
 # Pay-per-Use Electricity Smart Meter
-
 A decentralized electricity metering system built on Stacks blockchain.
 
 ## 🎯 Features
@@ -49,9 +48,4 @@ Suggested UI features:
 - Historical data storage
 - Balance management
 
-## 📝 Git Details
-
-Commit message:
-```
-feat: Implement Pay-per-Use Electricity Smart Meter contract
 ```
