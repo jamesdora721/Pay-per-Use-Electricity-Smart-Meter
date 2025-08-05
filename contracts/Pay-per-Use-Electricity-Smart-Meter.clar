@@ -377,3 +377,152 @@
         (ok false)
     )
 )
+
+(define-constant time-peak u1)
+(define-constant time-off-peak u2)
+(define-constant time-weekend u3)
+(define-constant err-invalid-time-period (err u111))
+
+(define-data-var peak-rate uint u150)
+(define-data-var off-peak-rate uint u80)
+(define-data-var weekend-rate uint u90)
+(define-data-var time-based-pricing-enabled bool false)
+
+(define-map time-periods
+    uint
+    {
+        start-hour: uint,
+        end-hour: uint,
+        days: uint,
+        rate-multiplier: uint,
+    }
+)
+
+(define-map consumption-by-period
+    {
+        user: principal,
+        period: uint,
+        date: uint,
+    }
+    {
+        units: uint,
+        amount-paid: uint,
+        rate-used: uint,
+    }
+)
+
+(define-private (get-time-period (height uint))
+    (let (
+            (hour (mod (/ height u10) u24))
+            (day-of-week (mod (/ height u240) u7))
+        )
+        (if (or (is-eq day-of-week u6) (is-eq day-of-week u0))
+            time-weekend
+            (if (and (>= hour u17) (<= hour u21))
+                time-peak
+                time-off-peak
+            )
+        )
+    )
+)
+
+(define-private (get-rate-for-period (period uint))
+    (if (var-get time-based-pricing-enabled)
+        (if (is-eq period time-peak)
+            (var-get peak-rate)
+            (if (is-eq period time-off-peak)
+                (var-get off-peak-rate)
+                (if (is-eq period time-weekend)
+                    (var-get weekend-rate)
+                    (var-get rate-per-unit)
+                )
+            )
+        )
+        (var-get rate-per-unit)
+    )
+)
+
+(define-public (consume-units-time-based (units uint))
+    (let (
+            (caller tx-sender)
+            (meter-data (unwrap! (map-get? meters caller) err-meter-not-found))
+            (current-period (get-time-period stacks-block-height))
+            (current-rate (get-rate-for-period current-period))
+            (cost (* units current-rate))
+            (date (/ stacks-block-height u1440))
+        )
+        (asserts! (get active meter-data) err-meter-inactive)
+        (asserts! (>= (get balance meter-data) cost) err-insufficient-balance)
+        (map-set consumption-history {
+            user: caller,
+            timestamp: stacks-block-height,
+        } {
+            units: units,
+            amount-paid: cost,
+        })
+        (map-set consumption-by-period {
+            user: caller,
+            period: current-period,
+            date: date,
+        } {
+            units: units,
+            amount-paid: cost,
+            rate-used: current-rate,
+        })
+        (ok (map-set meters caller
+            (merge meter-data {
+                balance: (- (get balance meter-data) cost),
+                units-consumed: (+ (get units-consumed meter-data) units),
+                last-reading: (+ (get last-reading meter-data) units),
+            })
+        ))
+    )
+)
+
+(define-public (configure-time-based-pricing
+        (peak-rate-new uint)
+        (off-peak-rate-new uint)
+        (weekend-rate-new uint)
+    )
+    (begin
+        (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+        (var-set peak-rate peak-rate-new)
+        (var-set off-peak-rate off-peak-rate-new)
+        (var-set weekend-rate weekend-rate-new)
+        (ok true)
+    )
+)
+
+(define-public (toggle-time-based-pricing)
+    (begin
+        (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+        (ok (var-set time-based-pricing-enabled
+            (not (var-get time-based-pricing-enabled))
+        ))
+    )
+)
+
+(define-read-only (get-time-based-rates)
+    (ok {
+        peak-rate: (var-get peak-rate),
+        off-peak-rate: (var-get off-peak-rate),
+        weekend-rate: (var-get weekend-rate),
+        enabled: (var-get time-based-pricing-enabled),
+    })
+)
+
+(define-read-only (get-current-time-period)
+    (ok (get-time-period stacks-block-height))
+)
+
+(define-read-only (get-period-consumption
+        (user principal)
+        (period uint)
+        (date uint)
+    )
+    (ok (map-get? consumption-by-period {
+        user: user,
+        period: period,
+        date: date,
+    }))
+)
