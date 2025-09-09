@@ -526,3 +526,299 @@
         date: date,
     }))
 )
+
+(define-constant points-per-topup u10)
+(define-constant points-per-off-peak-unit u2)
+(define-constant points-per-conservation u50)
+(define-constant points-redemption-rate u100)
+(define-constant loyalty-level-bronze u500)
+(define-constant loyalty-level-silver u1500)
+(define-constant loyalty-level-gold u3000)
+(define-constant conservation-threshold-percent u85)
+(define-constant err-insufficient-points (err u112))
+(define-constant err-loyalty-not-initialized (err u113))
+
+(define-data-var loyalty-program-enabled bool true)
+
+(define-map loyalty-accounts
+    principal
+    {
+        total-points: uint,
+        available-points: uint,
+        loyalty-level: uint,
+        last-reward-date: uint,
+        topup-streak: uint,
+        total-redeemed: uint,
+        baseline-consumption: uint,
+    }
+)
+
+(define-map loyalty-history
+    {
+        user: principal,
+        transaction-id: uint,
+    }
+    {
+        points-earned: uint,
+        action-type: uint,
+        timestamp: uint,
+        description: (string-ascii 64),
+    }
+)
+
+(define-map redemption-history
+    {
+        user: principal,
+        redemption-id: uint,
+    }
+    {
+        points-used: uint,
+        credit-amount: uint,
+        timestamp: uint,
+    }
+)
+
+(define-data-var loyalty-transaction-counter uint u0)
+(define-data-var redemption-counter uint u0)
+
+(define-private (get-loyalty-level (points uint))
+    (if (>= points loyalty-level-gold)
+        u3
+        (if (>= points loyalty-level-silver)
+            u2
+            (if (>= points loyalty-level-bronze)
+                u1
+                u0
+            )
+        )
+    )
+)
+
+(define-private (award-points
+        (user principal)
+        (points uint)
+        (action-type uint)
+        (description (string-ascii 64))
+    )
+    (let (
+            (loyalty-data (unwrap! (map-get? loyalty-accounts user) (err u0)))
+            (transaction-id (var-get loyalty-transaction-counter))
+            (new-total (+ (get total-points loyalty-data) points))
+            (new-available (+ (get available-points loyalty-data) points))
+            (new-level (get-loyalty-level new-total))
+        )
+        (var-set loyalty-transaction-counter (+ transaction-id u1))
+        (map-set loyalty-accounts user
+            (merge loyalty-data {
+                total-points: new-total,
+                available-points: new-available,
+                loyalty-level: new-level,
+                last-reward-date: stacks-block-height,
+            })
+        )
+        (map-set loyalty-history {
+            user: user,
+            transaction-id: transaction-id,
+        } {
+            points-earned: points,
+            action-type: action-type,
+            timestamp: stacks-block-height,
+            description: description,
+        })
+        (ok points)
+    )
+)
+
+(define-public (initialize-loyalty-account)
+    (let ((caller tx-sender))
+        (asserts! (is-some (map-get? meters caller)) err-meter-not-found)
+        (asserts! (is-none (map-get? loyalty-accounts caller)) (err u105))
+        (ok (map-set loyalty-accounts caller {
+            total-points: u0,
+            available-points: u0,
+            loyalty-level: u0,
+            last-reward-date: stacks-block-height,
+            topup-streak: u0,
+            total-redeemed: u0,
+            baseline-consumption: u1000,
+        }))
+    )
+)
+
+(define-public (top-up-with-loyalty (amount uint))
+    (let (
+            (caller tx-sender)
+            (meter-data (unwrap! (map-get? meters caller) err-meter-not-found))
+        )
+        (asserts! (>= amount (var-get min-topup)) err-invalid-amount)
+        (try! (stx-transfer? amount caller contract-owner))
+        (map-set meters caller
+            (merge meter-data {
+                balance: (+ (get balance meter-data) amount),
+                last-payment: stacks-block-height,
+            })
+        )
+        (if (and
+                (var-get loyalty-program-enabled)
+                (is-some (map-get? loyalty-accounts caller))
+            )
+            (begin
+                (try! (award-points caller points-per-topup u1 "Topup Reward"))
+                (ok true)
+            )
+            (ok true)
+        )
+    )
+)
+
+(define-public (consume-units-with-loyalty (units uint))
+    (let (
+            (caller tx-sender)
+            (meter-data (unwrap! (map-get? meters caller) err-meter-not-found))
+            (current-period (get-time-period stacks-block-height))
+            (current-rate (get-rate-for-period current-period))
+            (cost (* units current-rate))
+            (date (/ stacks-block-height u1440))
+        )
+        (asserts! (get active meter-data) err-meter-inactive)
+        (asserts! (>= (get balance meter-data) cost) err-insufficient-balance)
+        (map-set consumption-history {
+            user: caller,
+            timestamp: stacks-block-height,
+        } {
+            units: units,
+            amount-paid: cost,
+        })
+        (map-set consumption-by-period {
+            user: caller,
+            period: current-period,
+            date: date,
+        } {
+            units: units,
+            amount-paid: cost,
+            rate-used: current-rate,
+        })
+        (map-set meters caller
+            (merge meter-data {
+                balance: (- (get balance meter-data) cost),
+                units-consumed: (+ (get units-consumed meter-data) units),
+                last-reading: (+ (get last-reading meter-data) units),
+            })
+        )
+        (if (and
+                (var-get loyalty-program-enabled)
+                (is-some (map-get? loyalty-accounts caller))
+                (is-eq current-period time-off-peak)
+            )
+            (begin
+                (try! (award-points caller (* units points-per-off-peak-unit) u2
+                    "Off-Peak Usage"
+                ))
+                (ok true)
+            )
+            (ok true)
+        )
+    )
+)
+
+(define-public (redeem-points-for-credit (points uint))
+    (let (
+            (caller tx-sender)
+            (loyalty-data (unwrap! (map-get? loyalty-accounts caller)
+                err-loyalty-not-initialized
+            ))
+            (meter-data (unwrap! (map-get? meters caller) err-meter-not-found))
+            (credit-amount (/ points points-redemption-rate))
+            (redemption-id (var-get redemption-counter))
+        )
+        (asserts! (>= (get available-points loyalty-data) points)
+            err-insufficient-points
+        )
+        (asserts! (> credit-amount u0) err-invalid-amount)
+        (var-set redemption-counter (+ redemption-id u1))
+        (map-set loyalty-accounts caller
+            (merge loyalty-data {
+                available-points: (- (get available-points loyalty-data) points),
+                total-redeemed: (+ (get total-redeemed loyalty-data) points),
+            })
+        )
+        (map-set meters caller
+            (merge meter-data { balance: (+ (get balance meter-data) credit-amount) })
+        )
+        (map-set redemption-history {
+            user: caller,
+            redemption-id: redemption-id,
+        } {
+            points-used: points,
+            credit-amount: credit-amount,
+            timestamp: stacks-block-height,
+        })
+        (ok credit-amount)
+    )
+)
+
+(define-public (check-conservation-reward)
+    (let (
+            (caller tx-sender)
+            (meter-data (unwrap! (map-get? meters caller) err-meter-not-found))
+            (loyalty-data (unwrap! (map-get? loyalty-accounts caller)
+                err-loyalty-not-initialized
+            ))
+            (current-consumption (get units-consumed meter-data))
+            (baseline (get baseline-consumption loyalty-data))
+            (conservation-percentage (/ (* current-consumption u100) baseline))
+        )
+        (if (and
+                (var-get loyalty-program-enabled)
+                (<= conservation-percentage conservation-threshold-percent)
+                (> baseline u0)
+            )
+            (begin
+                (try! (award-points caller points-per-conservation u3
+                    "Energy Conservation"
+                ))
+                (ok true)
+            )
+            (ok true)
+        )
+    )
+)
+
+(define-public (toggle-loyalty-program)
+    (begin
+        (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+        (ok (var-set loyalty-program-enabled (not (var-get loyalty-program-enabled))))
+    )
+)
+
+(define-read-only (get-loyalty-info (user principal))
+    (ok (map-get? loyalty-accounts user))
+)
+
+(define-read-only (get-loyalty-history
+        (user principal)
+        (transaction-id uint)
+    )
+    (ok (map-get? loyalty-history {
+        user: user,
+        transaction-id: transaction-id,
+    }))
+)
+
+(define-read-only (get-redemption-history
+        (user principal)
+        (redemption-id uint)
+    )
+    (ok (map-get? redemption-history {
+        user: user,
+        redemption-id: redemption-id,
+    }))
+)
+
+(define-read-only (get-loyalty-program-status)
+    (ok (var-get loyalty-program-enabled))
+)
+
+(define-read-only (calculate-redemption-value (points uint))
+    (ok (/ points points-redemption-rate))
+)
