@@ -822,3 +822,199 @@
 (define-read-only (calculate-redemption-value (points uint))
     (ok (/ points points-redemption-rate))
 )
+
+(define-constant voucher-validity-blocks u52560)
+(define-constant err-voucher-not-found (err u114))
+(define-constant err-voucher-already-redeemed (err u115))
+(define-constant err-voucher-expired (err u116))
+(define-constant err-invalid-voucher-code (err u117))
+
+(define-data-var voucher-counter uint u0)
+
+(define-map vouchers
+    uint
+    {
+        voucher-code: (string-ascii 32),
+        credit-amount: uint,
+        created-by: principal,
+        created-at: uint,
+        expires-at: uint,
+        redeemed: bool,
+        redeemed-by: (optional principal),
+        redeemed-at: (optional uint),
+    }
+)
+
+(define-map voucher-code-to-id
+    (string-ascii 32)
+    uint
+)
+
+(define-map user-voucher-redemptions
+    {
+        user: principal,
+        redemption-index: uint,
+    }
+    {
+        voucher-id: uint,
+        credit-amount: uint,
+        redeemed-at: uint,
+    }
+)
+
+(define-data-var user-redemption-counter uint u0)
+
+(define-public (generate-voucher
+        (voucher-code (string-ascii 32))
+        (credit-amount uint)
+    )
+    (let (
+            (voucher-id (var-get voucher-counter))
+            (current-height stacks-block-height)
+        )
+        (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+        (asserts! (> credit-amount u0) err-invalid-amount)
+        (asserts! (is-none (map-get? voucher-code-to-id voucher-code))
+            err-invalid-voucher-code
+        )
+        (var-set voucher-counter (+ voucher-id u1))
+        (map-set vouchers voucher-id {
+            voucher-code: voucher-code,
+            credit-amount: credit-amount,
+            created-by: tx-sender,
+            created-at: current-height,
+            expires-at: (+ current-height voucher-validity-blocks),
+            redeemed: false,
+            redeemed-by: none,
+            redeemed-at: none,
+        })
+        (map-set voucher-code-to-id voucher-code voucher-id)
+        (ok voucher-id)
+    )
+)
+
+(define-public (redeem-voucher (voucher-code (string-ascii 32)))
+    (let (
+            (caller tx-sender)
+            (meter-data (unwrap! (map-get? meters caller) err-meter-not-found))
+            (voucher-id (unwrap! (map-get? voucher-code-to-id voucher-code)
+                err-voucher-not-found
+            ))
+            (voucher-data (unwrap! (map-get? vouchers voucher-id) err-voucher-not-found))
+            (current-height stacks-block-height)
+            (redemption-index (var-get user-redemption-counter))
+        )
+        (asserts! (not (get redeemed voucher-data)) err-voucher-already-redeemed)
+        (asserts! (<= current-height (get expires-at voucher-data))
+            err-voucher-expired
+        )
+        (var-set user-redemption-counter (+ redemption-index u1))
+        (map-set vouchers voucher-id
+            (merge voucher-data {
+                redeemed: true,
+                redeemed-by: (some caller),
+                redeemed-at: (some current-height),
+            })
+        )
+        (map-set meters caller
+            (merge meter-data { balance: (+ (get balance meter-data) (get credit-amount voucher-data)) })
+        )
+        (map-set user-voucher-redemptions {
+            user: caller,
+            redemption-index: redemption-index,
+        } {
+            voucher-id: voucher-id,
+            credit-amount: (get credit-amount voucher-data),
+            redeemed-at: current-height,
+        })
+        (ok (get credit-amount voucher-data))
+    )
+)
+
+(define-public (batch-generate-vouchers
+        (voucher-codes (list 10 (string-ascii 32)))
+        (credit-amounts (list 10 uint))
+    )
+    (begin
+        (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+        (ok (map generate-voucher-internal voucher-codes credit-amounts))
+    )
+)
+
+(define-private (generate-voucher-internal
+        (voucher-code (string-ascii 32))
+        (credit-amount uint)
+    )
+    (let (
+            (voucher-id (var-get voucher-counter))
+            (current-height stacks-block-height)
+        )
+        (if (and
+                (> credit-amount u0)
+                (is-none (map-get? voucher-code-to-id voucher-code))
+            )
+            (begin
+                (var-set voucher-counter (+ voucher-id u1))
+                (map-set vouchers voucher-id {
+                    voucher-code: voucher-code,
+                    credit-amount: credit-amount,
+                    created-by: contract-owner,
+                    created-at: current-height,
+                    expires-at: (+ current-height voucher-validity-blocks),
+                    redeemed: false,
+                    redeemed-by: none,
+                    redeemed-at: none,
+                })
+                (map-set voucher-code-to-id voucher-code voucher-id)
+                voucher-id
+            )
+            u0
+        )
+    )
+)
+
+(define-read-only (get-voucher-by-code (voucher-code (string-ascii 32)))
+    (match (map-get? voucher-code-to-id voucher-code)
+        voucher-id (ok (map-get? vouchers voucher-id))
+        err-voucher-not-found
+    )
+)
+
+(define-read-only (get-voucher-by-id (voucher-id uint))
+    (ok (map-get? vouchers voucher-id))
+)
+
+(define-read-only (check-voucher-validity (voucher-code (string-ascii 32)))
+    (match (map-get? voucher-code-to-id voucher-code)
+        voucher-id (match (map-get? vouchers voucher-id)
+            voucher-data (ok {
+                valid: (and
+                    (not (get redeemed voucher-data))
+                    (<= stacks-block-height (get expires-at voucher-data))
+                ),
+                credit-amount: (get credit-amount voucher-data),
+                expires-at: (get expires-at voucher-data),
+            })
+            err-voucher-not-found
+        )
+        err-voucher-not-found
+    )
+)
+
+(define-read-only (get-user-voucher-redemption
+        (user principal)
+        (redemption-index uint)
+    )
+    (ok (map-get? user-voucher-redemptions {
+        user: user,
+        redemption-index: redemption-index,
+    }))
+)
+
+(define-read-only (get-total-vouchers-generated)
+    (ok (var-get voucher-counter))
+)
+
+(define-read-only (get-total-redemptions)
+    (ok (var-get user-redemption-counter))
+)
