@@ -1018,3 +1018,51 @@
 (define-read-only (get-total-redemptions)
     (ok (var-get user-redemption-counter))
 )
+
+(define-data-var sponsor-topup-counter uint u0)
+
+(define-map sponsor-topups
+    uint
+    {
+        user: principal,
+        sponsor: principal,
+        amount: uint,
+        timestamp: uint,
+    }
+)
+
+(define-public (top-up-for
+        (user principal)
+        (amount uint)
+    )
+    (let (
+            (payer tx-sender)
+            (meter-data (unwrap! (map-get? meters user) err-meter-not-found))
+            (idx (var-get sponsor-topup-counter))
+        )
+        (asserts! (>= amount (var-get min-topup)) err-invalid-amount)
+        (try! (stx-transfer? amount payer contract-owner))
+        (map-set meters user
+            (merge meter-data {
+                balance: (+ (get balance meter-data) amount),
+                last-payment: stacks-block-height,
+            })
+        )
+        (map-set sponsor-topups idx {
+            user: user,
+            sponsor: payer,
+            amount: amount,
+            timestamp: stacks-block-height,
+        })
+        (var-set sponsor-topup-counter (+ idx u1))
+        (ok idx)
+    )
+)
+
+(define-read-only (get-sponsor-topup (id uint))
+    (ok (map-get? sponsor-topups id))
+)
+
+(define-read-only (get-total-sponsored-topups)
+    (ok (var-get sponsor-topup-counter))
+)
